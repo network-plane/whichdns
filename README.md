@@ -30,7 +30,7 @@ Default interface: wlp4s0
 [![Go Mod](https://img.shields.io/github/go-mod/go-version/earentir/whichdns)]()
 
 
-[![Dependancies](https://img.shields.io/librariesio/github/earentir/whichdns)]()
+[![Dependancies](https://img.shields.io/librariesio/github/earentir/whichdns)](https://libraries.io/github/earentir/whichdns)
 
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/8653/badge)](https://www.bestpractices.dev/projects/8653)
 
