@@ -1,24 +1,41 @@
 # whichdns
-Does a DNS request to identify the DNS server that provided the reply. Some times its difficult to know which dns server is used by the system to do a request by default.
-This tool does a DNS request while doing a packet capture and gets the DNS server that replied.
+When you do a DNS request, which DNS server is used? This tool will tell you.
+It does a DNS request while doing a packet capture and gets the DNS server that replied.
 
 Warning: Requires root access since it does a packet capture while doing the dns requests.
 
 
 ## Usage/Examples
 
-### Check version of current and compare to latest release
+### get DNS server
 ```bash
 sudo ./whichdns
 ```
 
+### Reutrn only the DNS server for use in scripts
+```bash
+sudo ./whichdns --iponly
+```
+
 ## How To build
 Needs pcap to build
+
+### Fedora
+```bash
+dnf install libpcap-devel
+```
+
+### Debian
+```bash
+apt install libpcap-dev
+```
+
+### Build
 ```bash
 CGO_ENABLED=1 go build
 ```
 
-### Example output
+## Example output
 ```bash
 Default interface: wlp4s0
 2024/03/11 22:16:18 Making DNS requests
@@ -28,7 +45,6 @@ Default interface: wlp4s0
 
 ## Dependancies & Documentation
 [![Go Mod](https://img.shields.io/github/go-mod/go-version/earentir/whichdns)]()
-
 
 [![Dependancies](https://img.shields.io/librariesio/github/earentir/whichdns)](https://libraries.io/github/earentir/whichdns)
 
