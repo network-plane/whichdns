@@ -5,85 +5,107 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"sync"
+	"os"
+	"os/user"
+	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/pcap"
 )
 
+const appversion = "1.0.3"
+const captureTimeout = 10 * time.Second
+
 func main() {
-	// Define a flag for the domain
-	domainPtr := flag.String("domain", "example.com", "the domain for DNS lookup")
-	flag.Parse()
+	// Initialize and parse arguments
+	domain, printVersion, ipOnly := parseArguments()
 
-	// Identify the default interface
-	fmt.Println()
-	iface, err := getDefaultInterface()
-	if err != nil {
-		fmt.Printf("error: %v\n", err)
-		return
-	}
-	fmt.Printf("Default interface: %v\n", iface.Name)
-
-	// Initialize packet capture
-	handle, err := pcap.OpenLive(iface.Name, 1600, true, pcap.BlockForever)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer handle.Close()
-
-	// Set filter to only capture DNS packets
-	err = handle.SetBPFFilter("port 53")
-	if err != nil {
-		log.Fatal(err)
+	// If the ipOnly flag is set, suppress log output
+	if *ipOnly {
+		log.SetOutput(os.Stderr)
+		log.SetFlags(0)
 	}
 
-	// Create a wait group to wait for DNS reply
-	var wg sync.WaitGroup
-	wg.Add(1)
+	// Print version and exit if requested
+	if *printVersion {
+		fmt.Printf("Version: %s\n", appversion)
+		os.Exit(0)
+	}
 
-	// Start packet capture in a separate goroutine
-	go func() {
-		packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-		for packet := range packetSource.Packets() {
-			if packet.NetworkLayer() != nil && packet.TransportLayer() != nil {
-				srcIP := packet.NetworkLayer().NetworkFlow().Src()
-				srcPort := packet.TransportLayer().TransportFlow().Src()
-
-				// Check if this is a DNS response packet
-				if srcPort.String() == "53" {
-					log.Printf("DNS response from: %s\n", srcIP)
-					wg.Done() // Signal that DNS reply is captured
-					return    // Exit the goroutine after capturing DNS reply
-				}
-			}
+	// Check for root privileges
+	if !isRoot() {
+		if !*ipOnly {
+			fmt.Println("This program requires root privileges to run.")
+			fmt.Println("Please run it as root or with sudo.")
 		}
-	}()
+		os.Exit(1)
+	}
 
-	// Perform DNS request
-	log.Printf("Making DNS requests")
-	for i := 0; i < 4; i++ {
-		_, err = net.LookupHost(*domainPtr)
-		if err != nil {
-			log.Fatal(err)
+	// Get the default network interface
+	iface := getDefaultNetworkInterface(!*ipOnly)
+
+	// Start packet capture and DNS request
+	success, dnsIP := captureDNSResponse(iface, *domain)
+
+	// Output only the IP of the DNS server if the ipOnly flag is set
+	if *ipOnly {
+		if success {
+			fmt.Println(dnsIP)
+			os.Exit(0)
+		} else {
+			os.Exit(2)
 		}
 	}
-	log.Println("DNS request made.")
 
-	// Wait for DNS reply to be captured before exiting
-	wg.Wait()
+	// Exit with the appropriate code based on whether a DNS response was captured
+	if success {
+		os.Exit(0)
+	} else {
+		os.Exit(2)
+	}
 }
 
-func getDefaultInterface() (*net.Interface, error) {
+func parseArguments() (*string, *bool, *bool) {
+	domain := flag.String("domain", "example.com", "the domain for DNS lookup")
+	printVersion := flag.Bool("version", false, "print version and exit")
+	ipOnly := flag.Bool("iponly", false, "print only the IP address of the DNS server")
+	flag.Parse()
+	return domain, printVersion, ipOnly
+}
+
+// isRoot checks if the current user is root
+func isRoot() bool {
+	currentUser, err := user.Current()
+	if err != nil {
+		log.Fatalf("Failed to get current user: %v", err)
+	}
+	return currentUser.Uid == "0"
+}
+
+func getDefaultNetworkInterface(printOutput bool) *net.Interface {
+	iface, err := findDefaultNetworkInterface()
+	if err != nil {
+		if printOutput {
+			log.Printf("Failed to get the default interface: %v", err)
+		}
+		os.Exit(1)
+	}
+	if printOutput {
+		fmt.Printf("Default interface: %v\n", iface.Name)
+	}
+	return iface
+}
+
+func findDefaultNetworkInterface() (*net.Interface, error) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("could not list interfaces: %w", err)
 	}
 
 	for _, iface := range interfaces {
 		addrs, err := iface.Addrs()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("could not get addresses for interface %v: %w", iface.Name, err)
 		}
 
 		for _, addr := range addrs {
@@ -101,5 +123,50 @@ func getDefaultInterface() (*net.Interface, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("no default interface found")
+	return nil, fmt.Errorf("no suitable default interface found")
+}
+
+func captureDNSResponse(iface *net.Interface, domain string) (bool, string) {
+	handle, err := pcap.OpenLive(iface.Name, 1600, true, pcap.BlockForever)
+	if err != nil {
+		log.Printf("Failed to open interface for packet capture: %v", err)
+		os.Exit(1)
+	}
+	defer handle.Close()
+
+	// Capture only DNS packets
+	if err := handle.SetBPFFilter("port 53"); err != nil {
+		log.Printf("Failed to set BPF filter: %v", err)
+		os.Exit(1)
+	}
+
+	dnsResponseCh := make(chan string)
+	go func() {
+		packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+		for packet := range packetSource.Packets() {
+			if packet.NetworkLayer() != nil && packet.TransportLayer() != nil {
+				if packet.TransportLayer().TransportFlow().Src().String() == "53" {
+					dnsIP := packet.NetworkLayer().NetworkFlow().Src().String()
+					dnsResponseCh <- dnsIP
+					close(dnsResponseCh)
+					return
+				}
+			}
+		}
+	}()
+
+	// Make multiple DNS requests
+	for i := 0; i < 4; i++ {
+		if _, err := net.LookupHost(domain); err != nil {
+			log.Printf("DNS lookup failed: %v", err)
+			os.Exit(2)
+		}
+	}
+
+	select {
+	case dnsIP := <-dnsResponseCh:
+		return true, dnsIP
+	case <-time.After(captureTimeout):
+		return false, ""
+	}
 }
