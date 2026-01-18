@@ -6,8 +6,8 @@ import (
 )
 
 func TestParseArguments(t *testing.T) {
-	os.Args = []string{"cmd", "--domain", "test.com", "--version", "--iponly"}
-	domain, version, ipOnly := parseArguments()
+	os.Args = []string{"cmd", "--domain", "test.com", "--version", "--iponly", "--debug"}
+	domain, version, ipOnly, debug := parseArguments()
 
 	if *domain != "test.com" {
 		t.Errorf("Expected domain 'test.com', got '%s'", *domain)
@@ -17,6 +17,9 @@ func TestParseArguments(t *testing.T) {
 	}
 	if !*ipOnly {
 		t.Errorf("Expected ipOnly to be true")
+	}
+	if !*debug {
+		t.Errorf("Expected debug to be true")
 	}
 }
 
@@ -35,7 +38,7 @@ func TestFindDefaultNetworkInterface(t *testing.T) {
 }
 
 func TestGetDefaultNetworkInterface(t *testing.T) {
-	iface := getDefaultNetworkInterface(true)
+	iface := getDefaultNetworkInterface(true, nil)
 	if iface == nil {
 		t.Fatalf("Expected a network interface, got nil")
 	}

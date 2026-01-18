@@ -1,3 +1,5 @@
+// Package main implements a DNS server detection tool that captures network packets
+// to identify which DNS server responds to DNS queries.
 package main
 
 import (
@@ -21,19 +23,35 @@ const (
 
 // AF_PACKET constants
 const (
-	AF_PACKET = syscall.AF_PACKET
-	SOCK_RAW  = syscall.SOCK_RAW
+	afPacket = syscall.AF_PACKET
+	sockRaw  = syscall.SOCK_RAW
 )
 
-// sockaddr_ll structure for AF_PACKET
-type sockaddr_ll struct {
-	sll_family   uint16
-	sll_protocol uint16
-	sll_ifindex  int32
-	sll_hatype   uint16
-	sll_pkttype  uint8
-	sll_halen    uint8
-	sll_addr     [8]uint8
+// Network protocol constants
+const (
+	ethPAll    = 0x0003 // Ethernet protocol: All packets
+	ethPIPv4   = 0x0800 // Ethernet protocol: IPv4
+	ipProtoUDP = 17     // IP protocol: UDP
+	dnsPort    = 53     // DNS service port
+)
+
+// Packet size constants
+const (
+	ethHeaderLen = 14 // Ethernet header length
+	ipHeaderMin  = 20 // Minimum IP header length
+	udpHeaderLen = 8  // UDP header length
+	ipSrcOffset  = 12 // IP source address offset in header
+)
+
+// sockaddrLl structure for AF_PACKET
+type sockaddrLl struct {
+	sllFamily   uint16
+	sllProtocol uint16
+	sllIfindex  int32
+	sllHatype   uint16
+	sllPkttype  uint8
+	sllHalen    uint8
+	sllAddr     [8]uint8
 }
 
 // Global variables
@@ -393,16 +411,16 @@ func debugLog(format string, a ...interface{}) {
 // openAFPacketSocket creates a raw AF_PACKET socket for packet capture
 func openAFPacketSocket(iface *net.Interface) (int, error) {
 	// Create raw socket to capture all Ethernet frames
-	fd, err := syscall.Socket(AF_PACKET, SOCK_RAW, int(htons(0x0003))) // ETH_P_ALL
+	fd, err := syscall.Socket(afPacket, sockRaw, int(htons(ethPAll)))
 	if err != nil {
 		return -1, fmt.Errorf("failed to create AF_PACKET socket: %w", err)
 	}
 
 	// Bind to interface
-	sa := &sockaddr_ll{
-		sll_family:   AF_PACKET,
-		sll_protocol: htons(0x0003), // ETH_P_ALL
-		sll_ifindex:  int32(iface.Index),
+	sa := &sockaddrLl{
+		sllFamily:   afPacket,
+		sllProtocol: htons(ethPAll),
+		sllIfindex:  int32(iface.Index),
 	}
 
 	_, _, errno := syscall.Syscall(syscall.SYS_BIND, uintptr(fd), uintptr(unsafe.Pointer(sa)), unsafe.Sizeof(*sa))
@@ -428,7 +446,8 @@ func htons(x uint16) uint16 {
 
 // readPacket reads a single packet from the AF_PACKET socket
 func readPacket(fd int) ([]byte, error) {
-	buf := make([]byte, 65536) // Maximum Ethernet frame size
+	const maxFrameSize = 65536 // Maximum Ethernet frame size
+	buf := make([]byte, maxFrameSize)
 
 	n, _, err := syscall.Recvfrom(fd, buf, 0)
 	if err != nil {
@@ -452,33 +471,33 @@ func readPacket(fd int) ([]byte, error) {
 
 // parseEthernetFrame parses basic Ethernet frame to extract IP packet
 func parseEthernetFrame(frame []byte) ([]byte, bool) {
-	if len(frame) < 14 {
+	if len(frame) < ethHeaderLen {
 		return nil, false
 	}
 
-	// Check if it's IP (EtherType 0x0800)
+	// Check if it's IPv4 (EtherType 0x0800)
 	etherType := uint16(frame[12])<<8 | uint16(frame[13])
-	if etherType != 0x0800 { // IPv4
+	if etherType != ethPIPv4 {
 		return nil, false
 	}
 
-	return frame[14:], true
+	return frame[ethHeaderLen:], true
 }
 
 // parseIPPacket extracts UDP packet from IP packet
 func parseIPPacket(ipPacket []byte) ([]byte, bool) {
-	if len(ipPacket) < 20 {
+	if len(ipPacket) < ipHeaderMin {
 		return nil, false
 	}
 
-	// Check if it's UDP (protocol 17)
-	if ipPacket[9] != 17 {
+	// Check if it's UDP
+	if ipPacket[9] != ipProtoUDP {
 		return nil, false
 	}
 
 	// Get header length (first 4 bits * 4)
 	headerLen := int(ipPacket[0]&0x0F) * 4
-	if len(ipPacket) < headerLen+8 {
+	if len(ipPacket) < headerLen+udpHeaderLen {
 		return nil, false
 	}
 
@@ -487,25 +506,25 @@ func parseIPPacket(ipPacket []byte) ([]byte, bool) {
 
 // parseUDPPacket extracts DNS data from UDP packet
 func parseUDPPacket(udpPacket []byte) ([]byte, uint16, bool) {
-	if len(udpPacket) < 8 {
+	if len(udpPacket) < udpHeaderLen {
 		return nil, 0, false
 	}
 
 	srcPort := uint16(udpPacket[0])<<8 | uint16(udpPacket[1])
 	dstPort := uint16(udpPacket[2])<<8 | uint16(udpPacket[3])
 
-	// Check if source port is 53 (DNS response)
-	if srcPort != 53 {
+	// Check if source port is DNS
+	if srcPort != dnsPort {
 		return nil, 0, false
 	}
 
 	// Get UDP data length
 	dataLen := uint16(udpPacket[4])<<8 | uint16(udpPacket[5])
-	if dataLen < 8 || len(udpPacket) < int(dataLen) {
+	if dataLen < udpHeaderLen || len(udpPacket) < int(dataLen) {
 		return nil, 0, false
 	}
 
-	return udpPacket[8:dataLen], dstPort, true
+	return udpPacket[udpHeaderLen:dataLen], dstPort, true
 }
 
 // extractDNSIP extracts the DNS server IP from the Ethernet frame
@@ -529,17 +548,10 @@ func extractDNSIP(frame []byte) (string, bool) {
 	}
 
 	// Extract source IP from IP header
-	if len(ipPacket) < 12 {
+	if len(ipPacket) < ipSrcOffset+4 {
 		return "", false
 	}
 
-	srcIP := net.IP(ipPacket[12:16])
+	srcIP := net.IP(ipPacket[ipSrcOffset : ipSrcOffset+4])
 	return srcIP.String(), true
-}
-
-// captureDNSResponse handles DNS response capturing
-func captureDNSResponse(iface *net.Interface, domain string, progressBar *ProgressBar) (bool, string, error) {
-	// This function is now redundant as packet capturing is handled in main
-	// Keeping it for potential future use or refactoring
-	return true, "", nil
 }
