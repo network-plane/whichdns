@@ -1,8 +1,8 @@
 # whichdns
 When you do a DNS request, which DNS server is used? This tool will tell you.
-It does a DNS request while doing a packet capture and gets the DNS server that replied.
+It does a DNS request while capturing network packets using native AF_PACKET sockets and gets the DNS server that replied.
 
-Warning: Requires root access since it does a packet capture while doing the dns requests.
+Warning: Requires root access since it captures network packets while doing the DNS requests.
 
 
 ## Usage/Examples
@@ -18,35 +18,52 @@ sudo ./whichdns --iponly
 ```
 
 ## How To build
-Needs pcap to build
-
-### Fedora
-```bash
-dnf install libpcap-devel
-```
-
-### Debian
-```bash
-apt install libpcap-dev
-```
+No external dependencies required - uses only native Linux AF_PACKET sockets.
 
 ### Build
 ```bash
-CGO_ENABLED=1 go build
+go build
 ```
+
+### Requirements
+- Linux (AF_PACKET sockets are Linux-specific)
+- Root privileges (for raw socket access)
+- Go 1.19+ (for AF_PACKET support)
 
 ## Example output
 ```bash
-Default interface: wlp4s0
-2024/03/11 22:16:18 Making DNS requests
-2024/03/11 22:16:18 DNS request made.
-2024/03/11 22:16:18 DNS response from: 192.168.178.21
+Default interface: eno1
+[████████████████████████████████████████] 100.00%
+DNS server IP: 1.1.1.1
 ```
 
-## Dependancies & Documentation
-[![Go Mod](https://img.shields.io/github/go-mod/go-version/earentir/whichdns)]()
+### With --iponly flag (script-friendly)
+```bash
+$ sudo ./whichdns --iponly
+1.1.1.1
+```
 
-[![Dependancies](https://img.shields.io/librariesio/github/earentir/whichdns)](https://libraries.io/github/earentir/whichdns)
+## Technical Implementation
+
+This tool uses **native Linux AF_PACKET raw sockets** to capture Ethernet frames directly from the network interface. Unlike traditional packet capture libraries, it performs all packet parsing and filtering in userspace using pure Go code.
+
+### Why AF_PACKET?
+- **Zero external dependencies** - No libpcap, CGO, or system libraries required
+- **Smaller binaries** - No vendored C libraries
+- **Better portability** - Only requires Linux kernel support
+- **Full control** - Custom packet dissection and filtering logic
+
+### How it works:
+1. Creates raw AF_PACKET socket bound to the default network interface
+2. Performs DNS lookups to generate network traffic
+3. Captures Ethernet frames containing DNS responses
+4. Parses Ethernet → IP → UDP → DNS packets in userspace
+5. Extracts the responding DNS server IP address
+
+**Requirements:** Linux with AF_PACKET support (kernel 2.2+), root privileges for raw socket access.
+
+## Documentation & Compliance
+[![Go Mod](https://img.shields.io/github/go-mod/go-version/earentir/whichdns)]()
 
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/8653/badge)](https://www.bestpractices.dev/projects/8653)
 
@@ -68,7 +85,9 @@ Please report any security vulnerabilities to the project using issues or direct
 
 ## Roadmap
 
-- add options to return just the dns server for use in scripts
+- [x] Add --iponly option to return just the DNS server IP for scripting
+- [x] Replace libpcap with native AF_PACKET sockets
+- [ ] Add support for other packet capture methods (BPF, etc.)
 
 ## Authors
 

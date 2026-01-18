@@ -9,14 +9,32 @@ import (
 	"os/user"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
-
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/pcap"
+	"unsafe"
 )
 
-const appversion = "1.0.3"
-const captureTimeout = 10 * time.Second
+const (
+	appversion     = "1.0.3"
+	captureTimeout = 10 * time.Second
+)
+
+// AF_PACKET constants
+const (
+	AF_PACKET = syscall.AF_PACKET
+	SOCK_RAW  = syscall.SOCK_RAW
+)
+
+// sockaddr_ll structure for AF_PACKET
+type sockaddr_ll struct {
+	sll_family   uint16
+	sll_protocol uint16
+	sll_ifindex  int32
+	sll_hatype   uint16
+	sll_pkttype  uint8
+	sll_halen    uint8
+	sll_addr     [8]uint8
+}
 
 // Global variables
 var (
@@ -63,6 +81,12 @@ func (p *ProgressBar) Render() {
 	if p.current >= p.total {
 		fmt.Println()
 	}
+}
+
+// Clear clears the progress bar line by overwriting it with spaces
+func (p *ProgressBar) Clear() {
+	// Clear the line by overwriting with spaces and carriage return
+	fmt.Printf("\r%s\r", strings.Repeat(" ", 70))
 }
 
 // IncrementDuringWait increments the progress bar every second during the wait period
@@ -132,45 +156,38 @@ func main() {
 	// Step 2: Get the default network interface
 	iface := getDefaultNetworkInterface(!*ipOnly, progressBar)
 	if !*ipOnly && !debug {
+		progressBar.Clear()
 		fmt.Printf("Default interface: %v\n", iface.Name)
+		progressBar.Render() // Restart progress bar on new line
 	}
 	debugLog("Default network interface obtained: %v", iface.Name)
 
-	// Step 3: Open live packet capture
+	// Step 3: Open AF_PACKET socket
 	if progressBar != nil {
 		progressBar.Advance()
 	}
-	handle, err := pcap.OpenLive(iface.Name, 1600, true, pcap.BlockForever)
+	fd, err := openAFPacketSocket(iface)
 	if err != nil {
-		log.Printf("Failed to open interface for packet capture: %v", err)
-		debugLog("Failed to open packet capture: %v", err)
+		log.Printf("Failed to open AF_PACKET socket: %v", err)
+		debugLog("Failed to open AF_PACKET socket: %v", err)
 		if progressBar != nil {
 			progressBar.Advance()
 		}
 		os.Exit(1)
 	}
 	defer func() {
-		handle.Close()
-		debugLog("Packet capture handle closed.")
-		if progressBar != nil {
+		syscall.Close(fd)
+		debugLog("AF_PACKET socket closed.")
+		if progressBar != nil && progressBar.current < progressBar.total {
 			progressBar.Advance()
 		}
 	}()
 
-	// Step 4: Set BPF filter
+	// Step 4: Skip BPF filter setup (we'll filter in userspace)
 	if progressBar != nil {
 		progressBar.Advance()
 	}
-	debugLog("Setting BPF filter to 'port 53' for DNS packets.")
-	if err := handle.SetBPFFilter("port 53"); err != nil {
-		log.Printf("Failed to set BPF filter: %v", err)
-		debugLog("Failed to set BPF filter: %v", err)
-		if progressBar != nil {
-			progressBar.Advance()
-		}
-		handle.Close()
-		os.Exit(1)
-	}
+	debugLog("AF_PACKET socket opened, filtering DNS packets in userspace.")
 
 	// Step 5: Start packet processing
 	if progressBar != nil {
@@ -181,22 +198,33 @@ func main() {
 
 	go func() {
 		debugLog("Starting packet processing goroutine.")
-		packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-		for packet := range packetSource.Packets() {
-			debugLog("Packet captured: %v", packet)
-			if packet.NetworkLayer() != nil && packet.TransportLayer() != nil {
-				srcPort := packet.TransportLayer().TransportFlow().Src().String()
-				if srcPort == "53" {
-					dnsIP := packet.NetworkLayer().NetworkFlow().Src().String()
+		startTime := time.Now()
+		for {
+			// Check if we've exceeded the timeout
+			if time.Since(startTime) > captureTimeout {
+				errorCh <- fmt.Errorf("packet capture timeout")
+				return
+			}
+
+			frame, err := readPacket(fd)
+			if err != nil {
+				errorCh <- fmt.Errorf("failed to read packet: %w", err)
+				return
+			}
+
+			if frame != nil {
+				debugLog("Packet captured: %d bytes", len(frame))
+
+				if dnsIP, ok := extractDNSIP(frame); ok {
 					debugLog("DNS response detected from IP: %v", dnsIP)
 					dnsResponseCh <- dnsIP
 					return
 				}
+			} else {
+				// Small delay to prevent busy waiting when no packets
+				time.Sleep(1 * time.Millisecond)
 			}
 		}
-		// If the packetSource channel is closed without receiving a DNS response
-		errorCh <- fmt.Errorf("packet source closed without capturing DNS response")
-		debugLog("Packet processing goroutine ended without capturing DNS response.")
 	}()
 
 	// Steps 6-9: Perform 4 DNS lookups
@@ -229,8 +257,10 @@ func main() {
 		// DNS response received
 		close(waitDone) // Stop the progress bar incrementing
 		// Ensure that the progress bar has reached totalProgress
-		for progressBar.current < progressBar.total {
-			progressBar.Advance()
+		if progressBar != nil {
+			for progressBar.current < progressBar.total {
+				progressBar.Advance()
+			}
 		}
 		if *ipOnly {
 			fmt.Println(dnsIP)
@@ -243,8 +273,10 @@ func main() {
 		// Error during packet processing
 		close(waitDone) // Stop the progress bar incrementing
 		// Ensure that the progress bar has reached totalProgress
-		for progressBar.current < progressBar.total {
-			progressBar.Advance()
+		if progressBar != nil {
+			for progressBar.current < progressBar.total {
+				progressBar.Advance()
+			}
 		}
 		if *ipOnly {
 			fmt.Fprintf(os.Stderr, "Failed to capture DNS response: %v\n", err)
@@ -257,8 +289,10 @@ func main() {
 		// Timeout occurred
 		close(waitDone) // Stop the progress bar incrementing
 		// Ensure that the progress bar has reached totalProgress
-		for progressBar.current < progressBar.total {
-			progressBar.Advance()
+		if progressBar != nil {
+			for progressBar.current < progressBar.total {
+				progressBar.Advance()
+			}
 		}
 		if *ipOnly {
 			fmt.Fprintf(os.Stderr, "Failed to capture DNS response: timeout after %v\n", captureTimeout)
@@ -354,6 +388,153 @@ func debugLog(format string, a ...interface{}) {
 	if debug {
 		log.Printf("[DEBUG] "+format, a...)
 	}
+}
+
+// openAFPacketSocket creates a raw AF_PACKET socket for packet capture
+func openAFPacketSocket(iface *net.Interface) (int, error) {
+	// Create raw socket to capture all Ethernet frames
+	fd, err := syscall.Socket(AF_PACKET, SOCK_RAW, int(htons(0x0003))) // ETH_P_ALL
+	if err != nil {
+		return -1, fmt.Errorf("failed to create AF_PACKET socket: %w", err)
+	}
+
+	// Bind to interface
+	sa := &sockaddr_ll{
+		sll_family:   AF_PACKET,
+		sll_protocol: htons(0x0003), // ETH_P_ALL
+		sll_ifindex:  int32(iface.Index),
+	}
+
+	_, _, errno := syscall.Syscall(syscall.SYS_BIND, uintptr(fd), uintptr(unsafe.Pointer(sa)), unsafe.Sizeof(*sa))
+	if errno != 0 {
+		syscall.Close(fd)
+		return -1, fmt.Errorf("failed to bind socket to interface: %w", errno)
+	}
+
+	// Set socket to non-blocking mode
+	if err := syscall.SetNonblock(fd, true); err != nil {
+		syscall.Close(fd)
+		return -1, fmt.Errorf("failed to set socket to non-blocking mode: %w", err)
+	}
+
+	debugLog("AF_PACKET socket created and bound to interface %s (index %d)", iface.Name, iface.Index)
+	return fd, nil
+}
+
+// htons converts host byte order to network byte order (big endian)
+func htons(x uint16) uint16 {
+	return (x<<8)&0xff00 | x>>8
+}
+
+// readPacket reads a single packet from the AF_PACKET socket
+func readPacket(fd int) ([]byte, error) {
+	buf := make([]byte, 65536) // Maximum Ethernet frame size
+
+	n, _, err := syscall.Recvfrom(fd, buf, 0)
+	if err != nil {
+		if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
+			// No data available, try again
+			return nil, nil
+		}
+		debugLog("Recvfrom error: %v", err)
+		return nil, err
+	}
+
+	if n == 0 {
+		// Empty packet, skip
+		debugLog("Received empty packet (n=0)")
+		return nil, nil
+	}
+
+	debugLog("Received packet with %d bytes", n)
+	return buf[:n], nil
+}
+
+// parseEthernetFrame parses basic Ethernet frame to extract IP packet
+func parseEthernetFrame(frame []byte) ([]byte, bool) {
+	if len(frame) < 14 {
+		return nil, false
+	}
+
+	// Check if it's IP (EtherType 0x0800)
+	etherType := uint16(frame[12])<<8 | uint16(frame[13])
+	if etherType != 0x0800 { // IPv4
+		return nil, false
+	}
+
+	return frame[14:], true
+}
+
+// parseIPPacket extracts UDP packet from IP packet
+func parseIPPacket(ipPacket []byte) ([]byte, bool) {
+	if len(ipPacket) < 20 {
+		return nil, false
+	}
+
+	// Check if it's UDP (protocol 17)
+	if ipPacket[9] != 17 {
+		return nil, false
+	}
+
+	// Get header length (first 4 bits * 4)
+	headerLen := int(ipPacket[0]&0x0F) * 4
+	if len(ipPacket) < headerLen+8 {
+		return nil, false
+	}
+
+	return ipPacket[headerLen:], true
+}
+
+// parseUDPPacket extracts DNS data from UDP packet
+func parseUDPPacket(udpPacket []byte) ([]byte, uint16, bool) {
+	if len(udpPacket) < 8 {
+		return nil, 0, false
+	}
+
+	srcPort := uint16(udpPacket[0])<<8 | uint16(udpPacket[1])
+	dstPort := uint16(udpPacket[2])<<8 | uint16(udpPacket[3])
+
+	// Check if source port is 53 (DNS response)
+	if srcPort != 53 {
+		return nil, 0, false
+	}
+
+	// Get UDP data length
+	dataLen := uint16(udpPacket[4])<<8 | uint16(udpPacket[5])
+	if dataLen < 8 || len(udpPacket) < int(dataLen) {
+		return nil, 0, false
+	}
+
+	return udpPacket[8:dataLen], dstPort, true
+}
+
+// extractDNSIP extracts the DNS server IP from the Ethernet frame
+func extractDNSIP(frame []byte) (string, bool) {
+	// Parse Ethernet frame
+	ipPacket, ok := parseEthernetFrame(frame)
+	if !ok {
+		return "", false
+	}
+
+	// Parse IP packet
+	udpPacket, ok := parseIPPacket(ipPacket)
+	if !ok {
+		return "", false
+	}
+
+	// Parse UDP packet
+	_, _, ok = parseUDPPacket(udpPacket)
+	if !ok {
+		return "", false
+	}
+
+	// Extract source IP from IP header
+	if len(ipPacket) < 12 {
+		return "", false
+	}
+
+	srcIP := net.IP(ipPacket[12:16])
+	return srcIP.String(), true
 }
 
 // captureDNSResponse handles DNS response capturing
