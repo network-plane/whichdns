@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	appversion     = "1.0.3"
+	appversion     = "1.1.11"
 	captureTimeout = 10 * time.Second
 )
 
