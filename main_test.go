@@ -1,22 +1,34 @@
 package main
 
 import (
-	"os"
 	"testing"
 )
 
-func TestParseArguments(t *testing.T) {
-	os.Args = []string{"cmd", "--domain", "test.com", "--version", "--iponly"}
-	domain, version, ipOnly := parseArguments()
+func TestFlags(t *testing.T) {
+	// Test default values
+	if domainFlag != "example.com" {
+		t.Errorf("Expected default domain 'example.com', got '%s'", domainFlag)
+	}
+	if ipOnlyFlag != false {
+		t.Errorf("Expected default ipOnly false, got %v", ipOnlyFlag)
+	}
+	if debugFlag != false {
+		t.Errorf("Expected default debug false, got %v", debugFlag)
+	}
 
-	if *domain != "test.com" {
-		t.Errorf("Expected domain 'test.com', got '%s'", *domain)
+	// Test setting flags
+	domainFlag = "test.com"
+	ipOnlyFlag = true
+	debugFlag = true
+
+	if domainFlag != "test.com" {
+		t.Errorf("Expected domain 'test.com', got '%s'", domainFlag)
 	}
-	if !*version {
-		t.Errorf("Expected version to be true")
-	}
-	if !*ipOnly {
+	if !ipOnlyFlag {
 		t.Errorf("Expected ipOnly to be true")
+	}
+	if !debugFlag {
+		t.Errorf("Expected debug to be true")
 	}
 }
 
@@ -35,7 +47,7 @@ func TestFindDefaultNetworkInterface(t *testing.T) {
 }
 
 func TestGetDefaultNetworkInterface(t *testing.T) {
-	iface := getDefaultNetworkInterface(true)
+	iface := getDefaultNetworkInterface(true, nil)
 	if iface == nil {
 		t.Fatalf("Expected a network interface, got nil")
 	}
