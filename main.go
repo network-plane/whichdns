@@ -3,7 +3,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -14,6 +13,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"github.com/spf13/cobra"
 )
 
 const (
@@ -121,25 +122,50 @@ func (p *ProgressBar) IncrementDuringWait(duration time.Duration, done chan stru
 	}
 }
 
-func main() {
-	// Parse command-line arguments
-	domain, printVersion, ipOnly, debugFlag := parseArguments()
-	debug = *debugFlag
+var (
+	domainFlag string
+	ipOnlyFlag bool
+	debugFlag  bool
+)
 
-	debugLog("Parsed arguments: domain=%s, printVersion=%v, ipOnly=%v, debug=%v", *domain, *printVersion, *ipOnly, *debugFlag)
+var rootCmd = &cobra.Command{
+	Use:   "whichdns",
+	Short: "Find which DNS server is being used",
+	Long: `A tool to detect which DNS server responds to DNS queries by capturing network packets.
+
+This tool performs DNS lookups while monitoring network traffic to identify
+which DNS server actually responds to the queries.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		runDNSCheck()
+	},
+}
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print the version number",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Printf("Version: %s\n", appversion)
+		debugLog("Printed version and exiting.")
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(versionCmd)
+	rootCmd.Flags().StringVar(&domainFlag, "domain", "example.com", "the domain for DNS lookup")
+	rootCmd.Flags().BoolVar(&ipOnlyFlag, "iponly", false, "print only the IP address of the DNS server")
+	rootCmd.Flags().BoolVar(&debugFlag, "debug", false, "enable debug output")
+}
+
+func runDNSCheck() {
+	debug = debugFlag
+
+	debugLog("Parsed arguments: domain=%s, ipOnly=%v, debug=%v", domainFlag, ipOnlyFlag, debugFlag)
 
 	// Suppress log output if ipOnly is set
-	if *ipOnly {
+	if ipOnlyFlag {
 		log.SetOutput(os.Stderr)
 		log.SetFlags(0)
 		debugLog("ipOnly flag is set; logging output suppressed.")
-	}
-
-	// Print version and exit if requested
-	if *printVersion {
-		fmt.Printf("Version: %s\n", appversion)
-		debugLog("Printed version and exiting.")
-		os.Exit(0)
 	}
 
 	// Define total steps and total progress units
@@ -156,7 +182,7 @@ func main() {
 
 	// Step 1: Check for root privileges
 	if !isRoot() {
-		if !*ipOnly {
+		if !ipOnlyFlag {
 			fmt.Fprintln(os.Stderr, "This program requires root privileges to run.")
 			fmt.Fprintln(os.Stderr, "Please run it as root or with sudo.")
 			debugLog("User does not have root privileges.")
@@ -172,8 +198,8 @@ func main() {
 	}
 
 	// Step 2: Get the default network interface
-	iface := getDefaultNetworkInterface(!*ipOnly, progressBar)
-	if !*ipOnly && !debug {
+	iface := getDefaultNetworkInterface(!ipOnlyFlag, progressBar)
+	if !ipOnlyFlag && !debug {
 		progressBar.Clear()
 		fmt.Printf("Default interface: %v\n", iface.Name)
 		progressBar.Render() // Restart progress bar on new line
@@ -247,11 +273,11 @@ func main() {
 
 	// Steps 6-9: Perform 4 DNS lookups
 	for i := 1; i <= 4; i++ {
-		debugLog("Performing DNS lookup for domain: %v (Attempt %d)", *domain, i)
+		debugLog("Performing DNS lookup for domain: %v (Attempt %d)", domainFlag, i)
 		if progressBar != nil {
 			progressBar.Advance()
 		}
-		_, err := net.LookupHost(*domain)
+		_, err := net.LookupHost(domainFlag)
 		if err != nil {
 			log.Printf("DNS lookup failed: %v", err)
 			debugLog("DNS lookup failed: %v", err)
@@ -280,7 +306,7 @@ func main() {
 				progressBar.Advance()
 			}
 		}
-		if *ipOnly {
+		if ipOnlyFlag {
 			fmt.Println(dnsIP)
 			debugLog("Printed DNS IP and exiting with code 0.")
 		} else {
@@ -296,7 +322,7 @@ func main() {
 				progressBar.Advance()
 			}
 		}
-		if *ipOnly {
+		if ipOnlyFlag {
 			fmt.Fprintf(os.Stderr, "Failed to capture DNS response: %v\n", err)
 			debugLog("DNS response not captured; reason: %v. Exiting with code 2.", err)
 		} else {
@@ -312,7 +338,7 @@ func main() {
 				progressBar.Advance()
 			}
 		}
-		if *ipOnly {
+		if ipOnlyFlag {
 			fmt.Fprintf(os.Stderr, "Failed to capture DNS response: timeout after %v\n", captureTimeout)
 			debugLog("DNS response capture timed out after %v. Exiting with code 2.", captureTimeout)
 		} else {
@@ -320,16 +346,6 @@ func main() {
 		}
 		os.Exit(2)
 	}
-}
-
-// parseArguments parses command-line arguments
-func parseArguments() (*string, *bool, *bool, *bool) {
-	domain := flag.String("domain", "example.com", "the domain for DNS lookup")
-	printVersion := flag.Bool("version", false, "print version and exit")
-	ipOnly := flag.Bool("iponly", false, "print only the IP address of the DNS server")
-	debugFlag := flag.Bool("debug", false, "enable debug output")
-	flag.Parse()
-	return domain, printVersion, ipOnly, debugFlag
 }
 
 // isRoot checks if the current user is root
@@ -554,4 +570,11 @@ func extractDNSIP(frame []byte) (string, bool) {
 
 	srcIP := net.IP(ipPacket[ipSrcOffset : ipSrcOffset+4])
 	return srcIP.String(), true
+}
+
+func main() {
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 }

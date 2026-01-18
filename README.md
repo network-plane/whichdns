@@ -7,14 +7,34 @@ Warning: Requires root access since it captures network packets while doing the 
 
 ## Usage/Examples
 
-### get DNS server
+### Get DNS server (default domain: example.com)
 ```bash
 sudo ./whichdns
 ```
 
-### Reutrn only the DNS server for use in scripts
+### Get DNS server for specific domain
 ```bash
-sudo ./whichdns --iponly
+sudo ./whichdns --domain google.com
+```
+
+### Return only the DNS server IP for use in scripts
+```bash
+sudo ./whichdns --iponly --domain google.com
+```
+
+### Enable debug output
+```bash
+sudo ./whichdns --debug --domain google.com
+```
+
+### Show version
+```bash
+./whichdns version
+```
+
+### Show help
+```bash
+./whichdns --help
 ```
 
 ## How To build
@@ -39,13 +59,26 @@ DNS server IP: 1.1.1.1
 
 ### With --iponly flag (script-friendly)
 ```bash
-$ sudo ./whichdns --iponly
+$ sudo ./whichdns --iponly --domain google.com
 1.1.1.1
+```
+
+### Version command
+```bash
+$ ./whichdns version
+Version: 1.0.3
 ```
 
 ## Technical Implementation
 
 This tool uses **native Linux AF_PACKET raw sockets** to capture Ethernet frames directly from the network interface. Unlike traditional packet capture libraries, it performs all packet parsing and filtering in userspace using pure Go code.
+
+### CLI Framework
+Built with **Cobra** - a modern CLI framework for Go that provides:
+- Long flag support only (no short flags)
+- Subcommands (version, help)
+- Automatic help generation
+- Clean command structure
 
 ### Why AF_PACKET?
 - **Zero external dependencies** - No libpcap, CGO, or system libraries required
